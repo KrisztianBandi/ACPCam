@@ -1,4 +1,4 @@
-# AC PhoneCam v4 – your Android phone as a VR-style camera for Assetto Corsa
+# AC PhoneCam v1 – your Android phone as a VR-style camera for Assetto Corsa
 
 Hold the phone like a real camera. **Turn it to look, physically move it to move the camera in 3D** (ARCore position
 tracking – walk around the car, crouch, lean in). Nothing is drawn on the game screen.
