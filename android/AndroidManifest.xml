@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.phonecam" android:versionCode="4" android:versionName="4.0">
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.ar" android:required="false" />
+    <queries>
+        <package android:name="com.google.ar.core" />
+    </queries>
+    <application android:label="AC PhoneCam" android:icon="@drawable/ic_launcher" android:usesCleartextTraffic="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+        <meta-data android:name="com.google.ar.core.min_apk_version" android:value="210910000" />
+        <activity android:name=".MainActivity" android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name="com.google.ar.core.InstallActivity" android:exported="false"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:excludeFromRecents="true" android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Material.Light.Dialog.Alert" />
+    </application>
+</manifest>
