@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # ACPCam – realtime phone camera for Assetto Corsa
 
 Hold your phone like a real camera: **turn it to look, physically move it to move the camera in 3D** (ARCore tracking –
@@ -10,8 +9,7 @@ Nothing is drawn on the game screen.
 # AC PhoneCam v1 – your Android phone as a VR-style camera for Assetto Corsa
 
 Hold the phone like a real camera. **Turn it to look, physically move it to move the camera in 3D** (ARCore position
-tracking – walk around the car, crouch, lean in). Nothing is drawn on the game screen. NO REGISTRATION REQUIRED
->>>>>>> origin
+tracking – walk around the car, crouch, lean in). Nothing is drawn on the game screen. **NO REGISTRATION REQUIRED**
 
 ```
 Android app (ARCore) --Wi-Fi--> Python server on PC --localhost--> PhoneCam Lua app in AC --> camera
