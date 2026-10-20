@@ -5,9 +5,17 @@ import java.net.*;
 import java.security.SecureRandom;
 import android.util.Base64;
 
-/** Minimal WebSocket client (text frames out, ping/close handling in). Sends the latest message every 16 ms. */
+/**
+ * Minimal WebSocket client. Sends the latest pose every 16 ms plus queued one-off messages;
+ * receives text (errors) and binary (video frames) messages from the PC.
+ */
 public class WsClient {
-    public interface Listener { void onStatus(String s); }
+    public interface Listener {
+        void onStatus(String s);
+        void onOpen();
+        void onText(String text);
+        void onBinary(byte[] data);
+    }
 
     private final String host; private final int port; private final String path;
     private final Listener listener;
@@ -22,7 +30,7 @@ public class WsClient {
     }
 
     public void setLatest(String m) { latest = m; }
-    /** One-off message (e.g. blinker command), sent in order before the next pose. */
+    /** One-off message (blinker, photo, stream request), sent in order before the next pose. */
     public void send(String m) { outbox.add(m); }
 
     public void start() {
@@ -41,7 +49,7 @@ public class WsClient {
                 s = new Socket();
                 s.connect(new InetSocketAddress(host, port), 4000);
                 s.setTcpNoDelay(true);
-                final InputStream in = s.getInputStream();
+                final InputStream in = new BufferedInputStream(s.getInputStream(), 1 << 16);
                 final OutputStream out = s.getOutputStream();
                 byte[] k = new byte[16]; rnd.nextBytes(k);
                 String req = "GET " + path + " HTTP/1.1\r\nHost: " + host + ":" + port +
@@ -57,22 +65,34 @@ public class WsClient {
                     else state = (c == '\r') ? 1 : 0;
                 }
                 if (!sb.toString().contains(" 101")) throw new IOException("handshake refused");
+                outbox.clear();                         // never replay stale commands after a reconnect
                 listener.onStatus("Connected to " + host + ":" + port);
+                listener.onOpen();
 
                 final Socket fs = s;
                 final OutputStream fout = out;
                 Thread reader = new Thread(new Runnable() { public void run() {
+                    ByteArrayOutputStream frag = null; int fragOp = 0;
                     try {
                         while (running) {
                             int b0 = in.read(); if (b0 < 0) break;
                             int b1 = in.read(); if (b1 < 0) break;
+                            boolean fin = (b0 & 0x80) != 0;
                             int op = b0 & 0x0f; long len = b1 & 0x7f;
                             if (len == 126) len = (in.read() << 8) | in.read();
                             else if (len == 127) { len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | in.read(); }
+                            if (len > 16 * 1024 * 1024) break;
                             byte[] p = new byte[(int) len]; int off = 0;
                             while (off < len) { int r = in.read(p, off, (int) len - off); if (r < 0) throw new IOException(); off += r; }
                             if (op == 8) break;
-                            if (op == 9) synchronized (fout) { writeFrame(fout, 0xA, p); }
+                            if (op == 9) { synchronized (fout) { writeFrame(fout, 0xA, p); } continue; }
+                            if (op == 1 || op == 2) {
+                                if (fin) deliver(op, p);
+                                else { frag = new ByteArrayOutputStream(); fragOp = op; frag.write(p); }
+                            } else if (op == 0 && frag != null) {
+                                frag.write(p);
+                                if (fin) { deliver(fragOp, frag.toByteArray()); frag = null; }
+                            }
                         }
                     } catch (Exception e) { }
                     try { fs.close(); } catch (Exception e) { }
@@ -96,6 +116,13 @@ public class WsClient {
             }
             if (running) { try { Thread.sleep(2000); } catch (InterruptedException e) { break; } }
         }
+    }
+
+    private void deliver(int op, byte[] p) {
+        try {
+            if (op == 1) listener.onText(new String(p, "UTF-8"));
+            else listener.onBinary(p);
+        } catch (Exception e) { }
     }
 
     private void writeFrame(OutputStream out, int op, byte[] payload) throws IOException {

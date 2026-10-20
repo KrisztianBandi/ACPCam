@@ -40,6 +40,7 @@ import json
 
 CONFIG_PATH = os.path.join(HERE, "phonecam_config.json")
 DEFAULT_KEYS = {"left": "Num4", "right": "Num6", "hazard": "Num5", "photo": "F12"}   # F12 = Steam screenshot key
+DEFAULT_CAPTURE = "window"          # "window" = Assetto Corsa window, "monitor" = whole primary monitor
 
 SCANCODES = {
     **{str(i): 0x01 + i for i in range(1, 10)}, "0": 0x0B,
@@ -55,9 +56,14 @@ SCANCODES = {
 
 def load_config():
     cfg = dict(DEFAULT_KEYS)
+    cfg["capture"] = DEFAULT_CAPTURE
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg.update({k: v for k, v in json.load(f).items() if k in DEFAULT_KEYS and v in SCANCODES})
+            for k, v in json.load(f).items():
+                if k in DEFAULT_KEYS and v in SCANCODES:
+                    cfg[k] = v
+                elif k == "capture" and v in ("window", "monitor"):
+                    cfg[k] = v
     except Exception:
         pass
     return cfg
@@ -126,6 +132,152 @@ def find_steam_screenshots():
     return max(found, key=os.path.getmtime) if found else None
 
 
+
+# --------------------------------------------------------------------------
+# Realtime cam: capture the Assetto Corsa window and stream JPEG frames to the phone
+# --------------------------------------------------------------------------
+import io
+
+
+def enable_dpi_awareness():
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()      # real pixel coordinates for capture
+        except Exception:
+            pass
+
+
+def find_ac_client_rect():
+    """Screen rectangle of the Assetto Corsa game window's client area (Windows), or None."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+    EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, lparam):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        t = buf.value
+        if t.startswith("Assetto Corsa") and "Content Manager" not in t and "PhoneCam" not in t and "ACPCam" not in t:
+            found.append(hwnd)
+            return False
+        return True
+
+    user32.EnumWindows(EnumProc(cb), 0)
+    if not found:
+        return None
+    hwnd = found[0]
+    rc = wintypes.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(rc))
+    pt = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    w, h = rc.right - rc.left, rc.bottom - rc.top
+    if w < 64 or h < 64:
+        return None
+    return {"left": pt.x, "top": pt.y, "width": w, "height": h}
+
+
+class StreamParams:
+    def __init__(self, w, h, scale, fps, fit, q):
+        self.w = max(64, min(int(w), 4000))
+        self.h = max(64, min(int(h), 6000))
+        self.scale = max(0.1, min(float(scale), 1.0))
+        self.fps = max(5, min(int(fps), 60))
+        self.fit = bool(int(fit))
+        self.q = max(30, min(int(q), 95))
+
+
+def encode_frame(im, p, resample):
+    """Crop (Fill mode) / fit, scale to the phone's size (never upscaled, never stretched) and JPEG-encode."""
+    sw, sh = im.size
+    if not p.fit:                       # Fill: centre-crop to the phone's aspect ratio
+        target = p.w / p.h
+        if sw / sh > target:
+            nw = max(2, int(sh * target)); x = (sw - nw) // 2
+            im = im.crop((x, 0, x + nw, sh))
+        else:
+            nh = max(2, int(sw / target)); y = (sh - nh) // 2
+            im = im.crop((0, y, sw, y + nh))
+        sw, sh = im.size
+    s = min(p.w * p.scale / sw, p.h * p.scale / sh, 1.0)
+    ow, oh = max(2, int(sw * s)), max(2, int(sh * s))
+    if (ow, oh) != im.size:
+        im = im.resize((ow, oh), resample)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=p.q)
+    return buf.getvalue()
+
+
+class Streamer(threading.Thread):
+    def __init__(self, relay, ws, params):
+        super().__init__(daemon=True)
+        self.relay, self.ws, self.p = relay, ws, params
+        self.stop_flag = threading.Event()
+
+    def stop(self):
+        self.stop_flag.set()
+
+    def _text(self, msg):
+        asyncio.run_coroutine_threadsafe(Relay._safe_send(self.ws, msg), self.relay.loop)
+
+    def _fail(self, msg):
+        self.relay.log("Live view: " + msg)
+        self._text("E " + msg)
+
+    def run(self):
+        try:
+            import mss
+            from PIL import Image
+        except ImportError:
+            self._fail("PC is missing packages. Run:  pip install mss pillow")
+            return
+        resample = getattr(Image, "Resampling", Image).BILINEAR
+        self.relay.log("Live view started")
+        pending = None
+        rect, rect_t, warned = None, 0.0, False
+        try:
+            with mss.mss() as sct:
+                while not self.stop_flag.is_set():
+                    t0 = time.time()
+                    if pending is not None and not pending.done():     # Wi-Fi still sending the last frame: skip
+                        time.sleep(0.002)
+                        continue
+                    if rect is None or t0 - rect_t > 1.0:
+                        rect = None
+                        if self.relay.keys.get("capture", DEFAULT_CAPTURE) == "window":
+                            rect = find_ac_client_rect()
+                        if rect is None:
+                            mon = sct.monitors[1]
+                            rect = {"left": mon["left"], "top": mon["top"], "width": mon["width"], "height": mon["height"]}
+                        rect_t = t0
+                    try:
+                        shot = sct.grab(rect)
+                    except Exception as e:
+                        if not warned:
+                            self._fail(f"screen capture failed ({e})"); warned = True
+                        rect = None
+                        time.sleep(0.5)
+                        continue
+                    im = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                    data = encode_frame(im, self.p, resample)
+                    pending = asyncio.run_coroutine_threadsafe(self.ws.send(data), self.relay.loop)
+                    self.relay.stream_frames += 1
+                    delay = 1.0 / self.p.fps - (time.time() - t0)
+                    if delay > 0:
+                        time.sleep(delay)
+        except Exception as e:
+            self._fail(f"stopped ({e})")
+        self.relay.log("Live view stopped")
+
 # --------------------------------------------------------------------------
 # Relay server
 # --------------------------------------------------------------------------
@@ -140,6 +292,8 @@ class Relay:
         self._stop = None
         self.error = None
         self.keys = load_config()
+        self.streamers = {}
+        self.stream_frames = 0
 
     @staticmethod
     def _path(ws):
@@ -168,6 +322,24 @@ class Relay:
         self.log(f"{name.capitalize()}: pressing {key}")
         threading.Thread(target=press_key, args=(key,), daemon=True).start()
 
+    def _stream_cmd(self, ws, parts):
+        old = self.streamers.get(ws)
+        try:
+            if parts and parts[0] == "1" and len(parts) >= 7:
+                params = StreamParams(*parts[1:7])
+                if old is not None and old.is_alive():
+                    old.p = params                      # live update
+                else:
+                    st = Streamer(self, ws, params)
+                    self.streamers[ws] = st
+                    st.start()
+            else:
+                if old is not None:
+                    old.stop()
+                    self.streamers.pop(ws, None)
+        except Exception as e:
+            self.log(f"Bad live-view command {parts}: {e}")
+
     async def handler(self, ws, path=None):
         path = path or self._path(ws)
         if path.startswith("/phone"):
@@ -180,12 +352,16 @@ class Relay:
                         if msg.startswith("B "):
                             self._blinker(msg[2:].strip())
                             continue
+                        if msg.startswith("V "):
+                            self._stream_cmd(ws, msg[2:].split())
+                            continue
                         self.packets += 1
                         self.last_packet = time.time()
                         self._to_ac(msg)
             except Exception:
                 pass
             finally:
+                self._stream_cmd(ws, ["0"])
                 self.phones.discard(ws)
                 self.log("Phone disconnected")
                 if not self.phones:
@@ -306,12 +482,13 @@ def install_lua(ac_folder):
 # GUI
 # --------------------------------------------------------------------------
 def run_gui():
+    enable_dpi_awareness()
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext
 
     root = tk.Tk()
-    root.title("AC PhoneCam")
-    root.geometry("640x700")
+    root.title("ACPCam")
+    root.geometry("660x780")
 
     logbox = scrolledtext.ScrolledText(root, height=10, state="disabled")
 
@@ -404,6 +581,21 @@ def run_gui():
     tk.Label(root, text="Photo = Steam's screenshot key (F12 by default, see Steam > Settings > In Game). "
              "Needs AC launched through Steam.", anchor="w", fg="gray").pack(fill="x", padx=12)
 
+    cf = tk.Frame(root)
+    cf.pack(fill="x", padx=12, pady=(10, 0))
+    tk.Label(cf, text="Realtime cam captures:", font=("Segoe UI", 10, "bold")).pack(side="left")
+    cap_var = tk.StringVar(value="Assetto Corsa window" if relay.keys.get("capture") == "window" else "Whole primary monitor")
+    cap_cb = ttk.Combobox(cf, textvariable=cap_var, state="readonly", width=24,
+                          values=["Assetto Corsa window", "Whole primary monitor"])
+    cap_cb.pack(side="left", padx=8)
+
+    def _cap_changed(*_a):
+        relay.keys["capture"] = "window" if cap_var.get().startswith("Assetto") else "monitor"
+        save_config(relay.keys)
+    cap_var.trace_add("write", _cap_changed)
+    tk.Label(root, text="Needs: pip install mss pillow.  Run AC in windowed / borderless mode (exclusive fullscreen can't be captured).",
+             anchor="w", fg="gray").pack(fill="x", padx=12)
+
     tk.Label(root, text="3. Keep this window open. Status:", anchor="w",
              font=("Segoe UI", 10, "bold")).pack(fill="x", padx=12, pady=(10, 0))
     status = tk.Label(root, text="", anchor="w", justify="left", font=("Consolas", 11))
@@ -416,6 +608,7 @@ def run_gui():
         status.config(text=(
             f"Phone:          {'connected (' + rate + ')' if relay.phones else 'not connected'}\n"
             f"Assetto Corsa:  {'connected' if relay.acs else 'not connected (start a session)'}\n"
+            f"Live view:      {'STREAMING' if any(t.is_alive() for t in relay.streamers.values()) else 'idle'} ({relay.stream_frames} frames)\n"
             f"Packets relayed: {relay.packets}"))
         root.after(300, tick)
     tick()
@@ -428,6 +621,7 @@ def run_gui():
 
 
 def run_console():
+    enable_dpi_awareness()
     relay = Relay(lambda m: print(time.strftime("[%H:%M:%S] ") + m, flush=True))
     print("Phone app address:", "  or  ".join(f"{ip}:{PORT}" for ip in local_ips()))
     ac = find_ac_folder()

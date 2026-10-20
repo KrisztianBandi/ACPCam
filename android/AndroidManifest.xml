@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.phonecam" android:versionCode="4" android:versionName="4.0">
+    package="com.phonecam" android:versionCode="5" android:versionName="5.0">
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -9,7 +9,7 @@
     <queries>
         <package android:name="com.google.ar.core" />
     </queries>
-    <application android:label="AC PhoneCam" android:icon="@drawable/ic_launcher" android:usesCleartextTraffic="true"
+    <application android:label="ACPCam" android:icon="@drawable/ic_launcher" android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <meta-data android:name="com.google.ar.core" android:value="optional" />
         <meta-data android:name="com.google.ar.core.min_apk_version" android:value="210910000" />
